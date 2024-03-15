@@ -1,0 +1,206 @@
+import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join( os.getcwd(),'envs.txt'))
+import pandas as pd
+from CustomException import CustomException
+from sqlalchemy import create_engine, Table, MetaData
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+
+class ConnectMySQL():
+    
+    def __init__(self, host = os.getenv('HOST_MYSQL'),bd=os.getenv('DB_MYSQL'),user=os.getenv('USER_MYSQL'),password=os.getenv('PASSWORD_MYSQL'),port=os.getenv('PORT_MYSQL')):
+    
+        self.host               =  host
+        self.bd                 =  bd
+        self.user               =  user
+        self.port               =  port
+        self.password           =  password
+        self.string_conn        =  f"mysql+mysqlconnector://{self.user}:{self.password}@{self.host}:3310/{self.bd}"
+        #"mysql://{0}:{1}@{2}:{3}/{4}?charset=utf8".format(user, password, host, port, database)
+        self.metadata = MetaData()
+        self.batch_size     = 1
+        print(self.host , self.bd, self.user, self.port, self.password ,self.string_conn )
+        try:
+            self.engine      =  create_engine(self.string_conn)
+        except Exception as e:
+            raise CustomException('Error al crear el engine',e)   
+
+    ## Función de conexión a MySQL
+    def create_engine(self):
+        try:
+            self.engine      =  create_engine(self.string_conn)
+            #return create_engine(self.string_conn)   # este valor si quiero hacer multiples engine lo puedo descomentar y modificar
+        except Exception as e:
+            raise CustomException('Error al conectar con la base de datos',e) 
+        
+    def set_query(  self,  search_query ):
+        self.__query  =  search_query
+        
+    def get_query(self):
+        return self.__query
+    
+    def set_batch(  self,  batch_size ):
+        self.batch_size   =  batch_size
+        
+    def get_batch(self):
+        return self.batch_size 
+    
+    def generar_query_insert(self,table, columns):
+        """
+        Genera dinámicamente un query de inserción para una tabla dada y una lista de columnas.
+
+        Args:
+        - tabla: nombre de la tabla en la que se van a insertar los datos.
+        - columnas: lista de nombres de columnas en la tabla.
+
+        Returns:
+        - query: query de inserción generado dinámicamente.
+        """
+        num_columns = len(columns)
+        columns_str = ', '.join(columns)
+        values_str = ', '.join(['%s'] * num_columns)
+        self.__query = f"INSERT INTO {table} ({columns_str}) VALUES ({values_str})"
+    
+    
+    def close_connect(self):  
+        try:
+            self.__conn.close()
+        except Exception as e:
+            raise CustomException('Error al cerrar la conexión con la base de datos',e)  
+  
+            
+    def extract_data(self):
+        #self.create_engine()
+        df  = pd.read_sql(self.__query , con=self.engine.connect() ) 
+        return df
+    
+    def load_data(self,df, tbl_name):
+        pass
+        #df.to_sql(tbl_name, self.engine , if_exists='replace')
+     
+    def load_data_chemy(self,df,name_table_dest):
+        Session = sessionmaker(bind=self.engine)
+        table_dest = Table(name_table_dest, self.metadata , autoload=True, autoload_with=self.engine)
+        print(table_dest)
+        try:
+            datos = df.to_dict(orient='records')
+            # Insertar datos utilizando la sesión
+            with Session() as se:
+                se.execute(table_dest.insert(), datos)
+                se.commit()  # Confirmar la transacción
+        except SQLAlchemyError as e:
+            print("Error:", e)
+            if se:
+                se.rollback()  # Revertir la transacción en caso de error  
+        except Exception as e:
+            print("Error:", e)
+
+    def load_data_chemy_connect(self,df,name_table_dest):
+        table_dest = Table(name_table_dest, self.metadata , autoload=True, autoload_with=self.engine)
+        print(table_dest)
+        try:
+            datos = df.to_dict(orient='records')  
+            with self.engine.connect() as conn:
+                conn.execute(table_dest.insert(), datos)
+        except SQLAlchemyError as e:
+            conn.rollback()  # Revertir la transacción en caso de error
+            print("Error:", e)
+        except Exception as e:
+            print("Error:", e)
+            
+    def iterable_batch_chemy( self ):
+        while True:
+            rows = self.result.fetchmany(self.batch_size)  
+            if not rows:
+                print("entro a no rows")
+                print("rows",rows)
+                break
+            yield rows
+            
+    def extract_data_chemy(self):
+        try:
+            with self.Session() as session:
+                self.result = session.execute(self.__query)
+                self.column_names = list(self.result.keys())
+                print("column_names:",self.column_names )
+                for batch in self.iterable_batch_chemy():
+                    print("batch:",batch)
+                    pivote = pd.DataFrame(batch,columns=self.column_names) 
+                    yield pivote
+        except SQLAlchemyError as e:
+            print("Error:", e)
+        except Exception as e:
+            print("Error:", e)
+        
+        
+    def extract_data_all(self,batch_size=None):
+        
+        self.Session = sessionmaker(bind=self.engine)
+        df_list =[]
+        for pivote in self.extract_data_chemy():
+            print("pivote:--------")
+            display(pivote)
+            print(pivote.shape)
+            if not pivote.empty:
+                df_list.append(pivote) 
+        if df_list:  # Verificar si df_list contiene al menos un DataFrame
+            return pd.concat(df_list, ignore_index=True)
+        else:
+            return pd.DataFrame([],columns= self.column_names)  # Devolver un DataFrame vacío si df_list está vacío
+    
+    
+    def get_catalogs_(self,catalog,columns):
+        cols= ','.join(columns)
+        try:
+            df_result=None
+            self.__query    =  f'Select {cols} from {catalog};'
+            print("query:",self.__query )
+            df_result  =  self.extract_data_all()
+            print(type(df_result))
+            print(df_result.shape)
+            
+            display("df_result",df_result)
+            print("longitud:",len(df_result))
+            #print("result:",result)
+            #print("columns",columns)
+            return df_result
+        except CustomException as e:
+            raise e
+
+objConMysql = ConnectMySQL()
+
+search_query="SELECT * FROM CATALOGO"
+
+objConMysql.set_query(  'Select ID_ESTADO,ESTADO from ESTADO' )
+
+objConMysql.get_query( )
+df_cat_tab=objConMysql.extract_data_all(1)
+df_cat_tab
+search_query = 'SELECT * FROM CATALOGO'
+objConMysql.set_query(search_query )
+objConMysql.get_query()
+df_cat= objConMysql.extract_data_all(1)
+df_cat
+df ={"CATALOGO":['MEDICAMENTOS','BASICOS','PACIC','FRUTAS Y LEGUMBRES','ELECTRODOMESTICOS']}
+df_cat = pd.DataFrame(df)
+df_cat
+#objConMysql.load_data_batch(df_cat,'CATALOGO')
+#objConMysql.load_data(df_cat, 'CATALOGO')
+objConMysql.load_data_chemy(df_cat,'CATALOGO')
+objConMysql.load_data(df_cat,'CATALOGO')
+lista_culumns_cat  = ['ESTADO','MUNICIPIO','GIRO','CADENACOMERCIAL','CATALOGO','CATEGORIA','MARCA'] 
+dic_columns_id     = {"df_ESTADO":["ESTADO"], "df_MUNICIPIO":["MUNICIPIO"],"df_GIRO":["GIRO"],"df_CATALOGO":["CATALOGO"],"df_CATEGORIA":["CATEGORIA"],"df_MARCA":["MARCA"]}
+dic_columns_vs_cat = {"df_ESTADO":["ESTADO"], "df_MUNICIPIO":["MUNICIPIO"],"df_GIRO":["GIRO"],"df_CATALOGO":["CATALOGO"],"df_CATEGORIA":["CATEGORIA"],"df_MARCA":["MARCA"]}
+dic_columns_cat    =  {"df_ESTADO":["ID_ESTADO","ESTADO"], "df_MUNICIPIO":["ID_MUNICIPIO","MUNICIPIO"],"df_GIRO":["ID_GIRO","GIRO"],"df_CATALOGO":["ID_CATALOGO","CATALOGO"],"df_CATEGORIA":["ID_CATEGORIA","CATEGORIA"],"df_MARCA":["ID_MARCA","MARCA"]}
+    
+df_estado = pd.DataFrame({"ESTADO":["AGUASCALIENTES","BAJA CALIFORNIA","BAJA CALIFORNIA SUR","CAMPECHE","CHIAPAS","CHIHUAHUA"]})
+df_estado
+lista_culumns_cat  = ['ESTADO']
+dic_columns_id     = {"df_ESTADO":["ESTADO"]}
+dic_columns_vs_cat = {"df_ESTADO":["ESTADO"]}
+dic_columns_cat    =  {"df_ESTADO":["ID_ESTADO","ESTADO"]}
+
+objCat = CatalogUtility(lista_culumns_cat, dic_columns_id,dic_columns_vs_cat, dic_columns_cat)
+objCat._update(df_ci_resulting)
+    
